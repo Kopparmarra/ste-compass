@@ -860,6 +860,12 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
       if((knownVerbBases.has(w.lower)||approvedVerbBases.has(w.lower)) && /s$/.test(prev) && /^(?:against|to|on|in|with|from|into|at|for|over|under|through|by)$/.test(next)) return false;
       const nextLook=next?getLookup(next):null;
       const nextNounish=!!next && nextAdjacent && ((nextLook&&nextLook.rows.some(r=>r.p==='n')) || (!functionWords.has(next) && !knownVerbBases.has(next) && !approvedAdverbs.has(next)));
+      // A numeric quantity immediately before a token is strong noun evidence even though
+      // tokenWords() intentionally omits numbers. Example: "Remove 2 screws". Here SCREWS
+      // is the plural technical noun, not the inflected form of the non-approved verb SCREW.
+      const rawBefore=textForVocab.slice(Math.max(0,w.index-24),w.index);
+      const quantityBefore=/(?:^|[\s,(])\d+(?:[.,]\d+)?\s*$/.test(rawBefore);
+      if(quantityBefore) return true;
       if(nounBoundary.has(prev) && nextNounish) return true;
       if(nextNounish) return true;
       if(prev && prevAdjacent && !functionWords.has(prev) && (!next || functionWords.has(next))) return true;
@@ -974,9 +980,14 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
 
   function renderResults(text,issues,sentences){
     $('#emptyState').classList.add('hidden'); $('#results').classList.remove('hidden');
-    const errors=issues.filter(i=>i.severity==='error').length, reviews=issues.filter(i=>i.severity==='review').length;
+    const errors=issues.filter(i=>i.severity==='error').length;
+    const reviewFindings=issues.filter(i=>i.severity==='review' && i.action!=='add-term').length;
+    const hasTerminologyReview=issues.some(i=>i.action==='add-term');
+    // Project terminology is one author-review activity, not one Review finding per candidate.
+    const reviews=reviewFindings+(hasTerminologyReview?1:0);
+    const visibleIssueCount=errors+reviewFindings+(hasTerminologyReview?1:0);
     const activeRuleChecks = mode==='procedure'?24:21;
-    $('#errorCount').textContent=errors; $('#reviewCount').textContent=reviews; $('#issuesBadge').textContent=issues.length;
+    $('#errorCount').textContent=errors; $('#reviewCount').textContent=reviews; $('#issuesBadge').textContent=visibleIssueCount;
     $('#passedCount').textContent=Math.max(0,activeRuleChecks-new Set(issues.map(i=>i.rule)).size);
     const statusMark=$('#statusMark');
     if(errors>0){
@@ -1568,7 +1579,12 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
   }
 
   function updateLive(){
-    const text=$('#sourceText').value; const s=splitSentences(text); const words=(text.match(/\b[\w'-]+\b/g)||[]).length; $('#liveStats').textContent=`${words} words · ${s.length} sentences`;
+    const text=$('#sourceText').value;
+    const sentences=splitSentences(text);
+    // Use the same STE-aware counting logic as the analysis. This excludes structural work-step
+    // identifiers and treats permitted parenthetical groups/quoted text consistently.
+    const words=sentences.reduce((sum,s)=>sum+steWordCount(s.text),0);
+    $('#liveStats').textContent=`${words} words · ${sentences.length} sentences`;
   }
 
   function setMode(newMode){
@@ -1671,6 +1687,7 @@ The left brake lever operates the brake pads on the front wheel, and the right b
       {name:'REG taken-not-project-term',source:'Regression',mode:'procedure',text:'The cover should be taken off slowly.',termsNot:['taken']},
       {name:'REG inspect-is-vocabulary-not-imperative',source:'Regression',mode:'procedure',text:'Inspect the chain.',must:[['1.1','Inspect']],mustNot:[['5.3']],suggest:['EXAMINE']},
       {name:'REG screws-in-noun-context',source:'Regression',mode:'procedure',text:'Remove the two Allen screws.',mustNot:[['1.1','screws']]},
+      {name:'REG numeric-quantity-screws-noun-context',source:'Regression',mode:'procedure',text:'1 Remove 2 screws (A, B) from the front panel.',mustNot:[['1.1','screws']],counts:[8]},
       {name:'REG use-and-remove-review',source:'Regression',mode:'procedure',text:'Use the 8mm Allen wrench from the Specialist toolset and remove the two Allen screws.',must:[['5.2']]},
       {name:'REG work-step-numbers-not-language',source:'Regression',mode:'procedure',text:'1\nRemove the horn.\n2.1\nInstall the new horn.',mustNot:[['5.3','1'],['5.3','2.1']]},
       {name:'REG description-list-not-one-long-sentence',source:'Regression',mode:'description',text:'The system has these parts:\n- the brake lever\n- the brake cable\n- the brake pads',mustNot:[['6.3']]},
