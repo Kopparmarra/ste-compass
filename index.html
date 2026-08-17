@@ -48,7 +48,7 @@ button,input,select,textarea{font:inherit}.topbar{height:84px;background:rgba(25
         <div class="tagline">Write clear technical English with guidance, not guesswork.</div>
       </div>
     </div>
-    <div class="issue-pill"><span class="dot"></span> ASD-STE100 · Issue 9 · v0.24 · 2026</div>
+    <div class="issue-pill"><span class="dot"></span> ASD-STE100 · Issue 9 · v0.25 · 2026</div>
   </header>
 
   <main class="shell">
@@ -1667,6 +1667,35 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
         if(k==='software version' || k==='installed software version'){ out.delete(k); continue; }
       }
 
+      // Remove incomplete modifier fragments that occur only as the beginning of a longer
+      // technical noun in the source. Examples: "radar maintenance" in
+      // "radar maintenance application", and "radar processing" in "radar processing unit".
+      // Keep them if the same phrase also occurs independently.
+      const modifierTailWords=new Set(['maintenance','processing']);
+      const canonSourceTokens=tokenWords(
+        rawSource
+          .replace(/\([^)]*refer\s+to[^)]*\)/gi,' ')
+          .replace(/^.*\b(?:DMC|ICN)-[A-Z0-9-]+\b.*$/gmi,' ')
+          .replace(/\*\*|__/g,' ')
+      ).map(w=>termCanonical(w.lower));
+      for(const [k,v] of [...out]){
+        if(v.strong) continue;
+        const parts=k.split(' ');
+        if(parts.length<2 || !modifierTailWords.has(parts[parts.length-1])) continue;
+        let independent=false;
+        for(let i=0;i<=canonSourceTokens.length-parts.length;i++){
+          if(canonSourceTokens.slice(i,i+parts.length).join(' ')!==k) continue;
+          const next=canonSourceTokens[i+parts.length]||'';
+          // If every occurrence is immediately followed by another content word,
+          // this is only a modifier fragment, not a complete project term.
+          if(!next || globalFunctionWords.has(next)){
+            independent=true;
+            break;
+          }
+        }
+        if(!independent) out.delete(k);
+      }
+
       // For inferred technical nouns, show the canonical singular phrase so normal plurals do
       // not become separate project terminology entries. Strong author-marked terms keep their
       // authored display form.
@@ -2002,7 +2031,9 @@ The left brake lever holds the brake pads on the front wheel and the right brake
       {name:'REG radar-context-pos',source:'Regression',mode:'procedure',text:'Connect the maintenance laptop to the RPU service port. Start the radar maintenance application. Restart the Signal Processing Service.',mustNot:[['1.1/1.2','port'],['1.1/1.2','application'],['1.1/1.2','Processing'],['1.1/1.2','Service'],['1.1/1.2','restart']] },
       {name:'REG conditional-restart-is-TV-review',source:'Regression',mode:'procedure',text:'If the two software versions are the same, restart the Signal Processing Service.',must:[['1.12','restart']],mustNot:[['1.1/1.2','restart']],terms:['restart']},
       {name:'REG suppress-contained-signal-processing',source:'Regression',mode:'procedure',text:'Record the installed signal-processing software version.',terms:['signal-processing software version'],termsNot:['signal processing']},
-      {name:'REG keep-independent-signal-processing',source:'Regression',mode:'description',text:'Signal processing is necessary. Record the installed signal-processing software version.',terms:['signal processing','signal-processing software version']}
+      {name:'REG keep-independent-signal-processing',source:'Regression',mode:'description',text:'Signal processing is necessary. Record the installed signal-processing software version.',terms:['signal processing','signal-processing software version']},
+      {name:'REG suppress-radar-maintenance-fragment',source:'Regression',mode:'procedure',text:'Start the radar maintenance application.',terms:['radar maintenance application'],termsNot:['radar maintenance']},
+      {name:'REG suppress-radar-processing-fragment',source:'Regression',mode:'procedure',text:'Examine the Radar Processing Unit.',terms:['radar processing unit'],termsNot:['radar processing']}
     ],
     runAll(){
       const savedText=$('#sourceText').value, savedMode=mode, savedTerms=projectTerms.map(x=>({...x}));
