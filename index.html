@@ -48,7 +48,7 @@ button,input,select,textarea{font:inherit}.topbar{height:84px;background:rgba(25
         <div class="tagline">Write clear technical English with guidance, not guesswork.</div>
       </div>
     </div>
-    <div class="issue-pill"><span class="dot"></span> ASD-STE100 · Issue 9 · v0.20 · 2026</div>
+    <div class="issue-pill"><span class="dot"></span> ASD-STE100 · Issue 9 · v0.24 · 2026</div>
   </header>
 
   <main class="shell">
@@ -275,7 +275,7 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
       ['4.2','Do not omit words or use contractions to shorten sentences.','rule'],
       ['4.3','Use a vertical list for complex text.','review'],
       ['4.4','Use connecting words or phrases between related topics.','guide'],
-      ['4.5','Use articles or demonstrative adjectives where applicable before nouns and multi-word nouns.','guide']
+      ['4.5','Use articles or demonstrative adjectives where applicable before nouns and multi-word nouns.','review']
     ]],
     ['5','Procedural writing',[
       ['5.1','Use a maximum of 20 words in a procedural sentence.','rule'],
@@ -350,10 +350,26 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
   let filter = 'all';
   let projectTerms = loadTerms();
 
-  function loadTerms(){
-    try { return JSON.parse(localStorage.getItem('steCompassTerms') || '[]'); } catch { return []; }
+  function projectTypeToPos(type){ return type==='verb'?'v':'n'; }
+  function isApprovedGeneralProjectTerm(term,type){
+    const phrase=norm(term);
+    // A multi-word technical term can legitimately consist only of approved general words.
+    // Only remove one-word project entries when that same word is already approved by STE
+    // in the exact noun/verb role for which the author saved it.
+    if(!phrase || /\s/.test(phrase)) return false;
+    const pos=projectTypeToPos(type);
+    return getLookup(phrase).rows.some(r=>r.a && r.p===pos);
   }
-  function saveTerms(){ localStorage.setItem('steCompassTerms', JSON.stringify(projectTerms)); renderTerms(); }
+  function cleanProjectTerms(terms){
+    return (Array.isArray(terms)?terms:[]).filter(t=>t&&t.term&&!isApprovedGeneralProjectTerm(t.term,t.type));
+  }
+  function loadTerms(){
+    try { return cleanProjectTerms(JSON.parse(localStorage.getItem('steCompassTerms') || '[]')); } catch { return []; }
+  }
+  function saveTerms(){
+    projectTerms=cleanProjectTerms(projectTerms);
+    localStorage.setItem('steCompassTerms', JSON.stringify(projectTerms)); renderTerms();
+  }
   function norm(s){ return (s || '').toLowerCase().trim(); }
   function escapeHtml(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c])); }
   function stripQuoted(s){ return s.replace(/[“"][^”"]*[”"]/g,' QUOTEDTEXT '); }
@@ -382,6 +398,7 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
   function isProjectTerm(w, type){
     const exact=norm(w), canon=termCanonical(exact);
     return projectTerms.some(t => {
+      if(isApprovedGeneralProjectTerm(t.term,t.type)) return false;
       const tt=norm(t.term);
       return (tt===exact || termCanonical(tt)===canon) && (!type || t.type===type);
     });
@@ -496,6 +513,33 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
     return '';
   }
 
+  // A procedure can start with a short location/instrument phrase before the command:
+  // "On the operator display, select ..." / "With the tool, remove ...".
+  function procedureCommandCore(text){
+    const src=String(text||'').trim();
+    const comma=src.indexOf(',');
+    if(comma<0) return src;
+    const lead=src.slice(0,comma).trim();
+    const rest=src.slice(comma+1).trim();
+    if(!rest) return src;
+    if(/^(?:on|in|at|from|with|using|through|under|over|near|inside|outside)\b/i.test(lead)){
+      const first=firstCommandWord(rest);
+      if(first && isImperativeVerbForm(first)) return rest;
+    }
+    return src;
+  }
+
+  // UI/menu labels are controlled interface text, not normal author prose.
+  function maskUiSelectionText(text){
+    return String(text||'').replace(/\b(select)\s+([^\n.!?]+)/gi,(m,verb,obj)=>{
+      const trimmed=obj.trim();
+      const looksLikePath=/>/.test(trimmed);
+      const caps=tokenWords(trimmed).filter(t=>/^[A-Z][A-Za-z0-9-]*$/.test(t.text)).length;
+      const looksLikeLabel=caps>=1 && !/^the\b/i.test(trimmed);
+      return (looksLikePath||looksLikeLabel) ? `${verb} QUOTEDTEXT` : m;
+    });
+  }
+
   function isImperativeVerbForm(word){
     const w=norm(word);
     // Rule 5.3 is about grammatical command form. Dictionary approval is checked separately by Rule 1.1.
@@ -518,14 +562,27 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
 
     function pushSentenceText(block,startPos,kind='sentence',stepId=null){
       if(!block.trim()) return;
-      let protectedText=block.replace(/\b(e\.g|i\.e|a\.m|p\.m|No)\./gi,m=>m.replace(/\./g,'∯'));
+      // A dotted work-step id on the same line (for example, “1. Remove the panel.”)
+      // is document structure. Remove it before sentence segmentation so the id is not
+      // interpreted as a separate sentence or counted as a word.
+      let sourceBlock=block;
+      let sourceStart=startPos;
+      let sourceStepId=stepId;
+      const inlineDottedStep=/^\s*(\d+(?:\.\d+)*)\.\s+([A-Za-z][\s\S]*)$/.exec(sourceBlock);
+      if(inlineDottedStep){
+        sourceStepId=inlineDottedStep[1];
+        const contentIndex=sourceBlock.indexOf(inlineDottedStep[2]);
+        sourceStart += Math.max(0,contentIndex);
+        sourceBlock=inlineDottedStep[2];
+      }
+      let protectedText=sourceBlock.replace(/\b(e\.g|i\.e|a\.m|p\.m|No)\./gi,m=>m.replace(/\./g,'∯'));
       const re=/[^.!?]+(?:[.!?]+|$)/g; let m;
       while((m=re.exec(protectedText))){
         let raw=m[0].replace(/∯/g,'.').trim(); if(!raw) continue;
         const localStart=Math.max(0,m.index+(m[0].length-m[0].trimStart().length));
         const step=stripWorkStepPrefix(raw);
         if(!step.text) continue;
-        result.push({text:step.text,stepId:step.stepId||stepId,paragraph,start:startPos+localStart,kind});
+        result.push({text:step.text,stepId:step.stepId||sourceStepId,paragraph,start:sourceStart+localStart,kind});
       }
     }
     function flush(){
@@ -690,6 +747,18 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
 
       if(mode==='procedure'){
         let core=s.text.replace(/^(WARNING|CAUTION|NOTE|DANGER|NOTICE)\s*:\s*/i,'').trim();
+        // A safety block can use a second sentence to state the consequence/result.
+        // That sentence is descriptive by design and must not be forced into the imperative form.
+        // Keep this narrow: only the immediately following sentence in the same paragraph is
+        // exempt, and it must contain clear risk/result language rather than a new command.
+        const prevSentence=si>0?sentences[si-1]:null;
+        const previousStartsSafety=!!prevSentence && /^(WARNING|CAUTION|DANGER|NOTICE)\s*:/i.test(prevSentence.text);
+        const sameSafetyParagraph=!!prevSentence && prevSentence.paragraph===s.paragraph;
+        const consequenceFirst=firstCommandWord(core);
+        const looksLikeSafetyConsequence=previousStartsSafety && sameSafetyParagraph &&
+          !/^(WARNING|CAUTION|DANGER|NOTICE|NOTE)\s*:/i.test(s.text) &&
+          !isImperativeVerbForm(consequenceFirst) &&
+          (safetyRiskWords.test(core) || /\b(?:can|may|will)\s+(?:cause|result|prevent|lead)\b/i.test(core));
         // Rule 5.4: a necessary WHEN/IF condition belongs before the command.
         // Detect a trailing condition after a clear command, but do not duplicate the normal
         // condition-first check below.
@@ -704,7 +773,7 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
           const after=core;
           const first=firstCommandWord(after);
           if(first && isImperativeVerbForm(first)) addIssue(issues,{severity:'error',rule:'5.5',title:'Instruction in a note',message:'A note must give information, not an instruction.',snippet:s.text,suggestion:'Move the instruction into a work step, or rewrite the note as descriptive information.',sentenceIndex:si,confidence:'Medium'});
-        } else {
+        } else if(!looksLikeSafetyConsequence) {
           if(conditionStart.test(core)){
             const comma=core.indexOf(',');
             if(comma<0) addIssue(issues,{severity:'error',rule:'5.4',title:'Condition needs a comma',message:'A necessary condition should come first and be separated from the command with a comma.',snippet:s.text,suggestion:'Put the condition first, add a comma, and then give the command.',sentenceIndex:si,confidence:'High'});
@@ -714,9 +783,58 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
               if(first && !isImperativeVerbForm(first)) addIssue(issues,{severity:'review',rule:'5.3',title:'Check imperative form',message:`The command appears to start with “${first}”, which is not recognized as an approved base-form verb.`,snippet:s.text,suggestion:'Start the instruction with a clear imperative verb.',term:first,sentenceIndex:si,confidence:'Medium'});
             }
           } else {
-            const first=firstCommandWord(core);
+            const commandCore=procedureCommandCore(core);
+            const first=firstCommandWord(commandCore);
             if(first && !isImperativeVerbForm(first) && !/^\(?\d+[a-z]?\)?$/.test(first)) addIssue(issues,{severity:'review',rule:'5.3',title:'Check imperative form',message:`This procedural sentence does not clearly start with an approved imperative verb.`,snippet:s.text,suggestion:'Write the instruction directly in the imperative form.',term:first,sentenceIndex:si,confidence:'Medium'});
           }
+          // Rule 4.5 author review: detect likely missing articles before specific objects.
+          // This is intentionally conservative because English also permits bare nouns in some
+          // technical contexts. Strong signals are (1) a quantity followed by an object noun,
+          // e.g. “Remove 2 screws”, and (2) a bare multi-word noun immediately after a command,
+          // e.g. “Turn shaft assembly”.
+          {
+            let commandText=core;
+            if(conditionStart.test(commandText)){
+              const comma=commandText.indexOf(',');
+              if(comma>=0) commandText=commandText.slice(comma+1).trim();
+            }
+            const articleVerbs=new Set(['remove','install','examine','check','clean','disconnect','connect','open','close','turn','set','press','release','replace','adjust','measure','apply','put','move','tighten','loosen','hold','use']);
+            const cmdToks=tokenWords(commandText);
+            let vi=0;
+            while(vi<cmdToks.length && approvedAdverbs.has(cmdToks[vi].lower)) vi++;
+            const verb=cmdToks[vi]?.lower||'';
+            if(articleVerbs.has(verb)){
+              const afterVerb=commandText.slice((cmdToks[vi]?.index||0)+(cmdToks[vi]?.text.length||0)).trim();
+              const hasDeterminer=/^(?:the|a|an|this|that|these|those|each|every|some|any|your|our|its|their)\b/i.test(afterVerb);
+              if(!hasDeterminer){
+                const qty=/^(\d+(?:[.,]\d+)?|one|two|three|four|five|six|seven|eight|nine|ten)\s+([A-Za-z][A-Za-z'-]*)\b/i.exec(afterVerb);
+                let missing=false, objectText='';
+                if(qty){
+                  missing=true;
+                  objectText=`${qty[1]} ${qty[2]}`;
+                } else {
+                  // Only flag an unquantified bare object when there is strong multi-word noun
+                  // evidence. This avoids noisy findings for mass nouns such as “Apply pressure”.
+                  const ot=tokenWords(afterVerb);
+                  if(ot.length>=2){
+                    const a=ot[0], b=ot[1];
+                    const gap=afterVerb.slice(a.index+a.text.length,b.index);
+                    const aRows=getLookup(a.lower).rows, bRows=getLookup(b.lower).rows;
+                    const aNounish=aRows.some(r=>r.p==='n'||r.p==='adj') || isProjectTerm(a.lower,'noun');
+                    const bNounish=bRows.some(r=>r.p==='n') || isProjectTerm(b.lower,'noun') || (!bRows.length && !knownVerbBases.has(b.lower));
+                    if(/^[ \t-]+$/.test(gap) && aNounish && bNounish){
+                      missing=true;
+                      objectText=`${a.text} ${b.text}`;
+                    }
+                  }
+                }
+                if(missing){
+                  addIssue(issues,{severity:'review',rule:'4.5',title:'Check for a missing article',message:'This object appears to identify a specific item or group, but it has no article or demonstrative adjective.',snippet:s.text,suggestion:`Check whether “the” is required before “${objectText}”. For a specific item or group, use an article, for example “the ${objectText}”.`,sentenceIndex:si,confidence:'Medium'});
+                }
+              }
+            }
+          }
+
           const actionWords=(core.match(/\b(?:use|remove|install|examine|check|clean|disconnect|connect|open|close|turn|set|press|release|replace|adjust|measure|apply|put|move|start|stop|tighten|loosen|hold)\b/gi)||[]);
           const useAnd=/^\s*(?:\w+ly\s+)?use\b[\s\S]*?\band\s+(remove|install|tighten|loosen|adjust|connect|disconnect|clean|check|examine|replace|turn|set|press|release|move|hold)\b/i.exec(core);
           if(useAnd){
@@ -798,7 +916,7 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
       .replace(/__([^_]+)__/g,'$1')
       // Safety/note labels are document structure, not vocabulary tokens.
       .replace(/^\s*(WARNING|CAUTION|NOTE|DANGER|NOTICE)\s*:\s*/gmi,'');
-    const textForVocab=stripQuoted(vocabSource);
+    const textForVocab=stripQuoted(maskUiSelectionText(vocabSource));
     const seenUnknown=new Set();
     const idRanges=identifierRanges(textForVocab);
     const vocabTokens=tokenWords(textForVocab);
@@ -856,6 +974,11 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
       const nextAdjacent=!next || /^[ \t-]*$/.test(nextGap);
       const nounBoundary=new Set(['the','a','an','this','these','that','those','my','your','our','its','their','each','every','no','some','many','few','several','all','both','two','three','four','five','six','seven','eight','nine','ten']);
       const selfRows=getLookup(w.lower).rows;
+      // In a procedure, "and/or + base verb + object" is strong coordinated-command evidence.
+      // Example: "Lift the panel and place it on a clean surface." PLACE is a verb here,
+      // not the noun PLACE. Do not let the noun heuristic win before verb inference runs.
+      const coordinatedObjectLead=new Set(['the','a','an','it','them','this','that','these','those','your','its']);
+      if(mode==='procedure' && /^(?:and|or)$/.test(prev) && selfRows.some(r=>r.p==='v') && coordinatedObjectLead.has(next)) return false;
       if(/^(?:is|are|was|were|be|been|being)$/.test(prev) && selfRows.some(r=>r.p==='adj'||r.p==='adv')) return false;
       if((knownVerbBases.has(w.lower)||approvedVerbBases.has(w.lower)) && /s$/.test(prev) && /^(?:against|to|on|in|with|from|into|at|for|over|under|through|by)$/.test(next)) return false;
       const nextLook=next?getLookup(next):null;
@@ -872,6 +995,25 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
       return false;
     }
 
+    function technicalCompoundContext(i){
+      const w=vocabTokens[i];
+      const prev=i>0?vocabTokens[i-1]:null, next=i+1<vocabTokens.length?vocabTokens[i+1]:null;
+      const gapOK=(a,b)=>!!a&&!!b&&/^[ \t-]+$/.test(textForVocab.slice(a.index+a.text.length,b.index));
+      const content=t=>{
+        if(!t) return false;
+        const l=t.lower, rows=getLookup(l).rows;
+        if(functionWords.has(l)||approvedAdverbs.has(l)) return false;
+        if(rows.some(r=>r.p==='prep'||r.p==='conj'||r.p==='pron'||r.p==='art'||r.p==='adv')) return false;
+        return true;
+      };
+      const left=prev&&gapOK(prev,w)&&content(prev);
+      const right=next&&gapOK(w,next)&&content(next);
+      if(!left&&!right) return false;
+      if((prev&&/^[A-Z]/.test(prev.text)) || /^[A-Z]/.test(w.text) || (next&&/^[A-Z]/.test(next.text))) return true;
+      const techHeads=new Set(['port','unit','system','service','application','display','laptop','code','record','version','software','antenna','connector','panel','test','indication']);
+      return techHeads.has(w.lower) || (next&&techHeads.has(next.lower)) || (prev&&techHeads.has(prev.lower));
+    }
+
     function likelyVerbUse(i,look){
       const w=vocabTokens[i];
       const prev=i>0?vocabTokens[i-1].lower:'';
@@ -882,6 +1024,11 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
       const prev2=i>1?vocabTokens[i-2].lower:'';
       if((prev==='are'||prev==='is'||prev==='were'||prev==='was') && prev2==='there') return false;
       if(verbIntroducers.has(prev)) return true;
+      // Coordinated procedure commands: "Lift ... and place it ..." / "Remove ... and put it ...".
+      // Require a following object-like word so noun coordination such as "nut and bolt" is not
+      // misclassified as a second command.
+      const coordinatedObjectLead=new Set(['the','a','an','it','them','this','that','these','those','your','its']);
+      if(mode==='procedure' && /^(?:and|or)$/.test(prev) && coordinatedObjectLead.has(next) && look?.rows.some(r=>r.p==='v')) return true;
 
       // Technical noun compounds can end in a spelling that is also an inflected verb:
       // "Allen screws", "clamp bolts", "brake handles". A preceding content word is
@@ -919,25 +1066,57 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
       if(inRanges(w.index,idRanges)) continue;
       // Written number words are quantities, not project terminology.
       if(numberWords.has(lower)) continue;
-      if(projectTerms.some(t=>t.term===lower)) continue;
+      if(isProjectTerm(lower)) continue;
       if(british[lower]){ addIssue(issues,{severity:'error',rule:'1.14',title:'Use American English spelling',message:`“${w.text}” is a British spelling.`,snippet:w.text,suggestion:`Use “${british[lower]}” unless an official directive requires different spelling.`,term:w.text,confidence:'High'}); continue; }
+
+      // Common system/software actions such as RESTART can be legitimate project technical verbs.
+      // When they occur in a clear procedure-command position, do not let dictionary POS heuristics
+      // turn them into a hard vocabulary error. Ask the author to confirm the TV instead.
+      if(mode==='procedure' && new Set(['restart','reboot']).has(lower) &&
+         isAtClauseStart(textForVocab,w.index,{beforeWindow:18,boundaryChars:',:',stepIdLookback:28})){
+        addIssue(issues,{severity:'review',rule:'1.12',title:'Check technical-verb use',
+          message:`“${w.text}” is not approved as general STE vocabulary in this use, but it can be a project technical verb if your terminology source approves it.`,
+          snippet:w.text,
+          suggestion:'Confirm the technical verb in the project terminology. Otherwise use an approved STE construction.',
+          term:w.text,action:'add-term',suggestedType:'verb',confidence:'Medium'});
+        continue;
+      }
+
       const look=getLookup(lower);
       if(look.rows.length){
-        const anyApproved=look.rows.some(e=>e.a);
-        if(!anyApproved){
-          const alternatives=alternativeOverrides.get(look.inflectedOf||lower) || [...new Set(look.rows.flatMap(e=>e.x||[]))].slice(0,5);
-          const poses=[...new Set(look.rows.map(e=>e.p))];
-          const onlyVerb=poses.length===1 && poses[0]==='v';
-          const nounPhraseUse=likelyNounPhraseUse(wi);
-          // Noun-phrase context (for example RETAINING SCREWS) outweighs an inflected-verb spelling.
-          const verbUse=onlyVerb?(nounPhraseUse?false:likelyVerbUse(wi,look)):null;
-          if(nounPhraseUse && verbUse!==true){
-            addIssue(issues,{severity:'review',rule:'1.2/1.6',title:'Check technical-noun use',message:`“${w.text}” is not approved in its normal dictionary use, but here it appears to be part of a technical noun.`,snippet:w.text,suggestion:'Do not replace the word automatically. Confirm the complete technical noun in your project terminology.',term:w.text,action:'add-term',confidence:'Medium'});
-          } else if(onlyVerb && verbUse===false){
-            addIssue(issues,{severity:'review',rule:'1.2/1.6',title:'Check part of speech / technical noun',message:`“${w.text}” is non-approved as a verb in the Issue 9 dictionary, but here it appears to be used as a noun or as part of a technical noun.`,snippet:w.text,suggestion:'Do not replace it as a verb automatically. Confirm the complete technical noun in your project terminology.',term:w.text,action:'add-term',confidence:'Medium'});
+        const rows=look.rows;
+        const approvedRows=rows.filter(e=>e.a);
+        const nounPhraseUse=likelyNounPhraseUse(wi);
+        // Technical-document context can be stronger than the dictionary's normal part of speech.
+        // Examples: service PORT, maintenance APPLICATION, Radar PROCESSING Unit, Signal Processing SERVICE.
+        const technicalNounUse=nounPhraseUse || technicalCompoundContext(wi);
+        const hasVerbRow=rows.some(e=>e.p==='v');
+        const verbUse=hasVerbRow?(technicalNounUse?false:likelyVerbUse(wi,look)):null;
+        const usagePos=technicalNounUse?'n':verbUse===true?'v':null;
+
+        // Rule 1.2: dictionary approval is tied to part of speech. A word that is approved
+        // as a noun must not automatically pass when the sentence clearly uses it as a verb
+        // (and vice versa). When context is not reliable enough, prefer the approved reading
+        // rather than manufacture a false positive.
+        if(usagePos && approvedRows.some(e=>e.p===usagePos)) continue;
+        if(!usagePos && approvedRows.length) continue;
+
+        const relevantRows=usagePos?rows.filter(e=>e.p===usagePos):rows;
+        const nonApprovedRelevant=relevantRows.filter(e=>!e.a);
+        if(nonApprovedRelevant.length){
+          const alternatives=alternativeOverrides.get(look.inflectedOf||lower) || [...new Set(nonApprovedRelevant.flatMap(e=>e.x||[]))].slice(0,5);
+          const onlyVerb=nonApprovedRelevant.every(e=>e.p==='v');
+          if(usagePos==='n' && (rows.every(e=>e.p!=='n') || technicalCompoundContext(wi))){
+            addIssue(issues,{severity:'review',rule:'1.2/1.6',title:'Check technical-noun use',message:`“${w.text}” is not approved for this normal dictionary use, but here it appears to be part of a technical noun.`,snippet:w.text,suggestion:'Do not replace the word automatically. Confirm the complete technical noun in your project terminology.',term:w.text,action:'add-term',suggestedType:'noun',confidence:'Medium'});
+          } else if(usagePos==='v' && new Set(['restart','reboot']).has(lower)){
+            addIssue(issues,{severity:'review',rule:'1.12',title:'Check technical-verb use',message:`“${w.text}” is not approved as general STE vocabulary in this use, but it can be a project technical verb if your terminology source approves it.`,snippet:w.text,suggestion:'Confirm the technical verb in the project terminology. Otherwise use an approved STE construction.',term:w.text,action:'add-term',suggestedType:'verb',confidence:'Medium'});
           } else {
-            addIssue(issues,{severity:'error',rule:'1.1',title:'Word is not approved',message:`“${w.text}” occurs in the Issue 9 dictionary as a non-approved${onlyVerb?' verb':' word'}.`,snippet:w.text,suggestion:alternatives.length?`Consider: ${alternatives.join(', ')}. Check context and part of speech before replacement.`:'Use an approved alternative or a different sentence construction.',term:w.text,alternatives,confidence:verbUse===null?'Medium':'High'});
+            addIssue(issues,{severity:'error',rule:'1.1/1.2',title:'Word is not approved for this use',message:`“${w.text}” is not approved in the Issue 9 dictionary for the ${usagePos==='v'?'verb':usagePos==='n'?'noun':'detected'} use in this sentence.`,snippet:w.text,suggestion:alternatives.length?`Consider: ${alternatives.join(', ')}. Check context and part of speech before replacement.`:'Use an approved alternative or a different sentence construction.',term:w.text,alternatives,confidence:usagePos?'High':'Medium'});
           }
+        } else if(usagePos==='n'){
+          // The spelling is dictionary-known, but not as a noun. It can still be a valid
+          // project technical noun, which must be an author decision rather than a hard error.
+          addIssue(issues,{severity:'review',rule:'1.2/1.6',title:'Check technical-noun use',message:`“${w.text}” is dictionary-known but not approved as a noun. In this context it appears to be a technical noun or part of one.`,snippet:w.text,suggestion:'Confirm the technical noun in your project terminology.',term:w.text,action:'add-term',suggestedType:'noun',confidence:'Medium'});
         }
       } else if(!approvedForms.has(lower) && !specialApprovedForms.has(lower) && !/^\d/.test(lower) && lower.length>1){
         const canonical=canonicalUnknown(lower);
@@ -982,13 +1161,28 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
     $('#emptyState').classList.add('hidden'); $('#results').classList.remove('hidden');
     const errors=issues.filter(i=>i.severity==='error').length;
     const reviewFindings=issues.filter(i=>i.severity==='review' && i.action!=='add-term').length;
-    const hasTerminologyReview=issues.some(i=>i.action==='add-term');
-    // Project terminology is one author-review activity, not one Review finding per candidate.
+    const activeRuleChecks = mode==='procedure'?24:21;
+
+    // Render first. Terminology inference applies additional context filters and can suppress
+    // raw add-term findings (for example, a term that the author already approved). Only a
+    // terminology panel that is actually still pending counts as an author Review.
+    try { renderIssues(); } catch(err) {
+      console.error('STE Compass issue rendering failed:',err);
+      renderIssuesFallback();
+    }
+    const hasTerminologyReview=!!$('#issueList .term-review');
     const reviews=reviewFindings+(hasTerminologyReview?1:0);
     const visibleIssueCount=errors+reviewFindings+(hasTerminologyReview?1:0);
-    const activeRuleChecks = mode==='procedure'?24:21;
-    $('#errorCount').textContent=errors; $('#reviewCount').textContent=reviews; $('#issuesBadge').textContent=visibleIssueCount;
-    $('#passedCount').textContent=Math.max(0,activeRuleChecks-new Set(issues.map(i=>i.rule)).size);
+
+    $('#errorCount').textContent=errors;
+    $('#reviewCount').textContent=reviews;
+    $('#issuesBadge').textContent=visibleIssueCount;
+
+    // Hidden/suppressed terminology candidates must not reduce the passed-check count either.
+    const countedRules=new Set(issues.filter(i=>i.action!=='add-term').map(i=>i.rule));
+    if(hasTerminologyReview) countedRules.add('1.5/1.12');
+    $('#passedCount').textContent=Math.max(0,activeRuleChecks-countedRules.size);
+
     const statusMark=$('#statusMark');
     if(errors>0){
       $('#scoreLabel').textContent='Needs revision';
@@ -1002,10 +1196,6 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
       $('#scoreLabel').textContent='No detected rule issues';
       $('#statusIcon').textContent='✓';
       statusMark.className='status-mark';
-    }
-    try { renderIssues(); } catch(err) {
-      console.error('STE Compass issue rendering failed:',err);
-      renderIssuesFallback();
     }
     renderAnnotated(text,sentences,issues);
   }
@@ -1097,7 +1287,7 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
     // headings and already-approved dictionary words are excluded. The goal is to keep genuine
     // domain terms visible even when the vocabulary checker correctly decides they are not errors.
     const inferredTermIssues=[];
-    const structuredSource=sourceTextForTermFilter
+    const structuredSource=maskUiSelectionText(sourceTextForTermFilter)
       .split(/\n/).map(line=>/^\s{0,3}#{1,6}\s+/.test(line)?'':line).join('\n')
       .replace(/\b(?:DMC|ICN)-[A-Z0-9-]+\b/gi,' ');
     const stoks=tokenWords(structuredSource);
@@ -1163,7 +1353,8 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
     // Unknown/non-general words are expanded to the longest plausible 1-3 word technical noun phrase.
     {
       const rawSource=$('#sourceText').value;
-      const cleanSource=rawSource
+      const terminologySource=maskUiSelectionText(rawSource);
+      const cleanSource=terminologySource
         .split(/\n/).map(line=>/^\s{0,3}#{1,6}\s+/.test(line)?'':line).join('\n')
         .replace(/\([^)]*refer\s+to\s+(?:\*\*|__)?[^)]+?(?:\*\*|__)?\)/gi,' ')
         .replace(/(?:\*\*|__)[^\n]+?(?:\*\*|__)\s*ICN-[A-Z0-9-]+/gi,' ')
@@ -1171,10 +1362,10 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
         .replace(/\*\*([^*]+)\*\*/g,'$1').replace(/__([^_]+)__/g,'$1');
       const canonPhrase=s=>tokenWords(String(s||'')).map(w=>termCanonical(w.lower)).join(' ');
       const out=new Map();
-      const hardRejectSingles=new Set(['hand','hands','floor','area','material','materials','part','parts','item','items','one','ones','he','she','him','her','his','hers','they','them','their','theirs','man','woman','men','women','taken']);
+      const hardRejectSingles=new Set(['hand','hands','floor','area','material','materials','part','parts','item','items','one','ones','he','she','him','her','his','hers','they','them','their','theirs','man','woman','men','women','taken','second','offline','online']);
       const functionish=new Set(['the','a','an','this','that','these','those','and','or','but','of','to','from','with','in','on','at','for','by','as','if','when','until','unless','because','which','who','whose','where','while','against','between','into','onto','through','over','under','after','before','during','without','within','than','then','is','are','was','were','be','been','being','has','have','had','will','would','can','could','must','shall','should','may','might','do','does','did','not','you','your','it','its','he','she','him','her','his','hers','they','them','their','theirs','one','ones']);
-      const weakModifiers=new Set(['middle','left','right','new','unwanted','rear','front','primary','secondary','applicable','appropriate','different','all','much','satisfactory','minimum','most','necessary','approved']);
-      const adverbLike=l=>/ly$|wards?$/.test(l)||['rearwards','rearward','forward','forwards'].includes(l);
+      const weakModifiers=new Set(['middle','left','right','new','unwanted','rear','front','primary','secondary','applicable','appropriate','different','all','much','satisfactory','minimum','most','necessary','approved','installed']);
+      const adverbLike=l=>/ly$|wards?$/.test(l)||['rearwards','rearward','forward','forwards','straight','upward','upwards','downward','downwards'].includes(l);
       const addTerm=(display,type='noun',strong=false)=>{
         display=String(display||'').trim().replace(/\s+/g,' ');
         const ws=tokenWords(display); if(!ws.length||ws.length>4) return;
@@ -1217,7 +1408,7 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
         }
         return kept.map(x=>x.text).join(' ');
       };
-      for(const line of rawSource.split(/\n/)){
+      for(const line of terminologySource.split(/\n/)){
         const m=/^\s*[-*+]\s+(.+?)\s*$/.exec(line);
         if(m){ const ph=normalizeStructuralPhrase(m[1]); const pw=tokenWords(ph); if(pw.length && !hardRejectSingles.has(termCanonical(pw[pw.length-1].lower)) && !weakModifiers.has(pw[0].lower)) addTerm(canonPhrase(ph),'noun',true); }
       }
@@ -1297,7 +1488,12 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
         if(rows.some(r=>r.p==='adv'||r.p==='prep'||r.p==='conj'||r.p==='pron'||r.p==='art')) return 'stop';
         // A dictionary entry that is only a verb is grammatical material, not a technical-noun token.
         // Treat it as a boundary in all positions (for example, "problem occurs" must not become terminology).
-        if(rows.some(r=>r.p==='v') && !rows.some(r=>r.p==='n'||r.p==='adj')) return 'verb';
+        if(rows.some(r=>r.p==='v') && !rows.some(r=>r.p==='n'||r.p==='adj')){
+          // In a capitalized system/component name, a normal dictionary verb spelling can be
+          // part of a technical noun: Signal Processing Service.
+          if(/^[A-Z]/.test(tok.text) && !atClauseStart(tok)) return 'possible-noun';
+          return 'verb';
+        }
         if(rows.some(r=>r.p==='adj')) return 'modifier';
         if(rows.some(r=>r.p==='n')) return 'noun';
         if(!rows.length) return 'unknown';
@@ -1376,12 +1572,22 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
       const vals=[...out.values()];
       const strongVals=vals.filter(x=>x.strong);
       const fragmentLead=new Set(['left','right','middle','rear','front','unwanted','satisfactory','applicable','different','all','much','clean']);
+      // Ordinary property + generic-head descriptions are not canonical project terminology.
+      // Examples: "clean surface", "flat area", "dry material". Preserve them only if the
+      // author explicitly marked the complete phrase as terminology with **...**.
+      const genericDescriptiveHeads=new Set(['surface','area','material','space','location','condition']);
+      const ordinaryPropertyModifiers=new Set(['clean','dirty','dry','wet','flat','smooth','rough','hot','cold','clear']);
+      const explicitTermCanons=new Set(inlineStrongTerms.map(canonPhrase));
       // Descriptive material phrases usually describe a property/material rather than name a component.
       // Keep terminology suggestions conservative unless the author explicitly marks such a phrase.
       const descriptiveMaterialLead=new Set(['hard-wearing','hardwearing']);
       for(const [k,v] of [...out]){
-        if(v.strong) continue;
         const kt=k.split(' ');
+        // Reject ordinary descriptive phrases even when grammatical structure made them a
+        // strong noun-position candidate. "Strong" here means strong grammatical evidence,
+        // not necessarily strong terminology evidence. Explicit **author-marked** terms survive.
+        if(kt.length===2 && ordinaryPropertyModifiers.has(kt[0]) && genericDescriptiveHeads.has(kt[1]) && !explicitTermCanons.has(k)){ out.delete(k); continue; }
+        if(v.strong) continue;
         // A shorter candidate fully contained in an explicitly marked term is redundant.
         if(strongVals.some(x=>x.term!==k && x.term.includes(k))) { out.delete(k); continue; }
         // Positional/evaluative modifiers usually describe an occurrence, not the canonical term.
@@ -1395,10 +1601,36 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
         if(kt.length>1 && (approvedVerbBases.has(kt[0])||knownVerbBases.has(kt[0]))) { out.delete(k); continue; }
         if(!k.includes(' ') && vals.some(x=>x.term!==k && x.term.split(' ').includes(k))) out.delete(k);
       }
-      // Longest-valid-phrase wins. Remove weak partial phrases when a longer candidate
-      // contains the same contiguous token sequence (for example, "chain cleaning" when
-      // "chain cleaning tool" or "chain cleaning fluid" exists). Keep explicitly marked
-      // strong terms unless a longer strong term subsumes them.
+      // Longest-valid-phrase wins, but only when the shorter candidate is never used
+      // independently in the author text. Example: if "signal processing" appears only inside
+      // "signal-processing software version", do not offer both terms. If it also appears by
+      // itself elsewhere, keep both because they can be separate project terms.
+      const canonAuthorTokens=tokenWords(
+        rawSource
+          .replace(/\([^)]*refer\s+to[^)]*\)/gi,' ')
+          .replace(/^.*\b(?:DMC|ICN)-[A-Z0-9-]+\b.*$/gmi,' ')
+          .replace(/\*\*|__/g,' ')
+      ).map(w=>termCanonical(w.lower));
+      const independentOccurrence=(shortTerm,longTerms)=>{
+        const st=shortTerm.split(' ');
+        for(let i=0;i<=canonAuthorTokens.length-st.length;i++){
+          if(canonAuthorTokens.slice(i,i+st.length).join(' ')!==shortTerm) continue;
+          let covered=false;
+          for(const long of longTerms){
+            const lt=long.split(' ');
+            for(let start=Math.max(0,i-(lt.length-st.length)); start<=i && start+lt.length<=canonAuthorTokens.length; start++){
+              if(canonAuthorTokens.slice(start,start+lt.length).join(' ')===long &&
+                 i>=start && i+st.length<=start+lt.length){
+                covered=true;
+                break;
+              }
+            }
+            if(covered) break;
+          }
+          if(!covered) return true;
+        }
+        return false;
+      };
       for(const [k,v] of [...out]){
         const kt=k.split(' ');
         const supersets=[...out.values()].filter(x=>x.term!==k).filter(x=>{
@@ -1407,7 +1639,9 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
           for(let p=0;p<=xt.length-kt.length;p++) if(xt.slice(p,p+kt.length).join(' ')===k) return true;
           return false;
         });
-        if(supersets.some(x=>!v.strong || x.strong)) out.delete(k);
+        if(!supersets.length) continue;
+        const longerTerms=supersets.map(x=>x.term);
+        if(!independentOccurrence(k,longerTerms) && supersets.some(x=>!v.strong || x.strong)) out.delete(k);
       }
       // A candidate must occur in author content, not only inside a cross-reference target or
       // an ICN illustration caption. Headings remain valid evidence because they can themselves be
@@ -1421,6 +1655,18 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
         const phrase=' '+v.term+' ';
         if(!evidenceCanon.includes(phrase)) out.delete(k);
       }
+      // Remove generic status/result/UI fragments and cross-step fragments. These are useful
+      // prose or interface concepts, but not normally canonical project terminology.
+      const genericTermHeads=new Set(['status','result','information','indication']);
+      for(const [k,v] of [...out]){
+        if(explicitTermCanons.has(k)) continue;
+        const kt=k.split(' ');
+        if(kt.length===1 && ['second','offline','online'].includes(k)){ out.delete(k); continue; }
+        if(kt.length>1 && genericTermHeads.has(kt[kt.length-1])){ out.delete(k); continue; }
+        if(kt.length>1 && kt[kt.length-1]==='rpu' && kt[0]!=='rpu'){ out.delete(k); continue; }
+        if(k==='software version' || k==='installed software version'){ out.delete(k); continue; }
+      }
+
       // For inferred technical nouns, show the canonical singular phrase so normal plurals do
       // not become separate project terminology entries. Strong author-marked terms keep their
       // authored display form.
@@ -1448,29 +1694,8 @@ window.STE_APPROVED_FORMS=["a","able","about","above","abrasive","absorb","absor
       }
     }
 
-    // If there are no new terminology candidates, show the project terms that are already
-    // approved and actually occur in this text. This makes persistent local terminology visible
-    // instead of making the terminology section appear to have disappeared.
-    const sourceLower=norm($('#sourceText').value);
-    const usedApproved=projectTerms.filter(t=>{
-      const phrase=norm(t.term);
-      if(!phrase) return false;
-      const rx=new RegExp(String.raw`\b${phrase.replace(/[.*+?^${}()|[\]\\]/g,'\\$&').replace(/\s+/g,'\\s+')}\b`,'i');
-      if(rx.test(sourceLower)) return true;
-      // Also accept a normal plural for a one-word approved TN.
-      if(t.type==='noun' && !phrase.includes(' ')){
-        const pluralRx=new RegExp(String.raw`\b${phrase.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}s\b`,'i');
-        return pluralRx.test(sourceLower);
-      }
-      return false;
-    });
-    const hasPendingTermPanel=!!list.querySelector('.term-review');
-    if(!hasPendingTermPanel && usedApproved.length){
-      const sec=document.createElement('section');
-      sec.className='approved-term-summary';
-      sec.innerHTML=`<div class="term-review-title">Project terminology already approved <span class="rule-pill">${usedApproved.length}</span></div><div class="term-review-copy">No new terminology needs approval in this text. These terms are already saved locally for this project.</div><div class="approved-used-grid">${usedApproved.map(t=>`<span class="approved-used-chip">${escapeHtml(t.term)} <b>${t.type==='verb'?'TV':'TN'}</b></span>`).join('')}</div>`;
-      list.appendChild(sec);
-    }
+    // Already-approved project terminology is not a finding. It remains visible in the
+    // Project terminology sidebar and does not clutter the Findings panel.
     if(!list.children.length){ list.innerHTML='<div class="soft-empty">No findings. Nice work.</div>'; }
   }
 
@@ -1653,7 +1878,7 @@ The left brake lever operates the brake pads on the front wheel, and the right b
     if(lastIssues.length || !$('#results').classList.contains('hidden')) resetAnalysisState({hideResults:true});
   });
   $$('.seg').forEach(b=>b.addEventListener('click',()=>setMode(b.dataset.mode)));
-  $('#addTermBtn').addEventListener('click',()=>{const term=norm($('#termInput').value);if(term&&!projectTerms.some(t=>termCanonical(t.term)===termCanonical(term))){projectTerms.push({term,type:$('#termType').value});saveTerms();$('#termInput').value=''; if($('#sourceText').value.trim())analyze();}});
+  $('#addTermBtn').addEventListener('click',()=>{const term=norm($('#termInput').value),type=$('#termType').value;if(term&&!isApprovedGeneralProjectTerm(term,type)&&!projectTerms.some(t=>termCanonical(t.term)===termCanonical(term))){projectTerms.push({term,type});saveTerms();$('#termInput').value=''; if($('#sourceText').value.trim())analyze();}});
   $('#termInput').addEventListener('keydown',e=>{if(e.key==='Enter')$('#addTermBtn').click()});
   $$('.tab').forEach(t=>t.addEventListener('click',()=>{$$('.tab').forEach(x=>x.classList.remove('active'));$$('.tab-panel').forEach(x=>x.classList.remove('active'));t.classList.add('active');$('#tab-'+t.dataset.tab).classList.add('active')}));
   $$('.filter').forEach(f=>f.addEventListener('click',()=>{$$('.filter').forEach(x=>x.classList.remove('active'));f.classList.add('active');filter=f.dataset.filter;renderIssues()}));
@@ -1682,14 +1907,22 @@ The left brake lever operates the brake pads on the front wheel, and the right b
       // Regression cases from bugs found during development.
       {name:'REG imperative-leading-adverb',source:'Regression',mode:'procedure',text:'Safely hold the bicycle.',mustNot:[['5.3']]},
       {name:'REG safety-label-not-vocabulary',source:'Regression',mode:'procedure',text:'WARNING: Disconnect the battery before servicing the unit.',mustNot:[['1.1','WARNING'],['3.5','WARNING']]},
+      {name:'REG safety-consequence-is-descriptive',source:'Regression',mode:'procedure',text:'CAUTION: Lift the front panel straight up. Sideways movement can cause damage to the connector.',mustNot:[['5.3','Sideways movement']]},
       {name:'REG retaining-screws-noun-context',source:'Regression',mode:'procedure',text:'Remove the four retaining screws.',mustNot:[['1.1','retaining']]},
       {name:'REG note-instruction-no-passive-duplicate',source:'Regression',mode:'procedure',text:'NOTE: Make sure that the wiring is not damaged.',must:[['5.5']],mustNot:[['3.6']]},
       {name:'REG taken-not-project-term',source:'Regression',mode:'procedure',text:'The cover should be taken off slowly.',termsNot:['taken']},
       {name:'REG inspect-is-vocabulary-not-imperative',source:'Regression',mode:'procedure',text:'Inspect the chain.',must:[['1.1','Inspect']],mustNot:[['5.3']],suggest:['EXAMINE']},
       {name:'REG screws-in-noun-context',source:'Regression',mode:'procedure',text:'Remove the two Allen screws.',mustNot:[['1.1','screws']]},
+      {name:'REG approved-panel-noun-passes',source:'Regression',mode:'procedure',text:'Remove the front panel.',mustNot:[['1.1','panel'],['1.2','panel']],termsNot:['panel']},
+      {name:'REG approved-word-wrong-pos-check-verb',source:'Regression',mode:'procedure',text:'Check the panel.',must:[['1.1/1.2','Check']]},
+      {name:'REG 4.5 missing-article-before-quantity',source:'Regression',mode:'procedure',text:'1 Remove 2 screws (A, B) from the front panel.',must:[['4.5']],mustNot:[['1.1','screws']],counts:[8]},
+      {name:'REG 4.5 article-before-quantity-present',source:'Regression',mode:'procedure',text:'1 Remove the 2 screws (A, B) from the front panel.',mustNot:[['4.5'],['1.1','screws']]},
+      {name:'REG 4.5 bare-multiword-object',source:'Regression',mode:'procedure',text:'Turn shaft assembly.',must:[['4.5']]},
+      {name:'REG 4.5 mass-noun-no-noisy-review',source:'Regression',mode:'procedure',text:'Apply pressure to the surface.',mustNot:[['4.5']]},
       {name:'REG numeric-quantity-screws-noun-context',source:'Regression',mode:'procedure',text:'1 Remove 2 screws (A, B) from the front panel.',mustNot:[['1.1','screws']],counts:[8]},
       {name:'REG use-and-remove-review',source:'Regression',mode:'procedure',text:'Use the 8mm Allen wrench from the Specialist toolset and remove the two Allen screws.',must:[['5.2']]},
       {name:'REG work-step-numbers-not-language',source:'Regression',mode:'procedure',text:'1\nRemove the horn.\n2.1\nInstall the new horn.',mustNot:[['5.3','1'],['5.3','2.1']]},
+      {name:'REG dotted-inline-work-step',source:'Regression',mode:'procedure',text:'1. Remove the 2 screws (A, B) on the front panel.',mustNot:[['5.3','1']],counts:[9]},
       {name:'REG description-list-not-one-long-sentence',source:'Regression',mode:'description',text:'The system has these parts:\n- the brake lever\n- the brake cable\n- the brake pads',mustNot:[['6.3']]},
       {name:'REG technical-ing-phrase',source:'Regression',mode:'procedure',text:'Open the chain cleaning tool.',mustNot:[['3.5','cleaning']]},
       {name:'REG button-is-tn-candidate-not-error',source:'Regression',mode:'procedure',text:'Push the button.',mustNot:[['1.1','button']]},
@@ -1734,6 +1967,8 @@ The left brake lever holds the brake pads on the front wheel and the right brake
       {name:'STE 5.4 condition-first accepted',source:'Issue 9 §5.4',mode:'procedure',text:'When the light comes on, set the switch to NORMAL.',mustNot:[['5.4']]},
       {name:'STE 5.4 condition-comma accepted',source:'Issue 9 §5.4',mode:'procedure',text:'If the Constant Speed Drive (CSD) does not operate correctly, disconnect it from the gearbox.',mustNot:[['5.4']]},
       {name:'REG condition-state-passive-not-command-passive',source:'Regression',mode:'procedure',text:'If the wiring is damaged, replace it.',mustNot:[['3.6'],['5.3'],['5.4']]},
+      {name:'REG coordinated-command-place-is-verb',source:'Regression',mode:'procedure',text:'Lift the front panel straight up and place it on a clean surface.',must:[['1.1/1.2','place']],mustNot:[['1.1/1.2','noun use']],suggest:['PUT']},
+      {name:'REG no-descriptive-terminology-fragments',source:'Regression',mode:'procedure',text:'Lift the front panel straight up. Put the front panel on a clean surface.',termsNot:['panel straight','clean surface']},
       {name:'STE 5.5 imperative note rejected',source:'Issue 9 §5.5',mode:'procedure',text:'NOTE: Make sure that the avionics ventilation system continues to operate correctly.',must:[['5.5']]},
       {name:'STE 5.5 descriptive note accepted',source:'Issue 9 §5.5',mode:'procedure',text:'NOTE: The gyroscope will become stable after approximately 15 seconds.',mustNot:[['5.5']]},
       {name:'STE 3.5 ing technical modifier accepted',source:'Issue 9 §3.5',mode:'description',text:'Use the grinding wheel.',mustNot:[['3.5','grinding']]},
@@ -1759,7 +1994,15 @@ The left brake lever holds the brake pads on the front wheel and the right brake
       {name:'REG approved-recovery-protrude',source:'Issue 9 dictionary recovery',mode:'description',text:'The pin can protrude.',mustNot:[['1.1','protrude']],termsNot:['protrude']},
       {name:'REG approved-recovery-previous',source:'Issue 9 dictionary recovery',mode:'description',text:'The previous test was satisfactory.',mustNot:[['1.1','previous'],['1.1','satisfactory']],termsNot:['previous','satisfactory']},
       {name:'STE 7.3 missing consequence reviewed',source:'Issue 9 §7.3',mode:'procedure',text:'WARNING: USE PROTECTIVE EQUIPMENT.',must:[['7.3']]},
-      {name:'STE 7.1 warning damage category reviewed',source:'Issue 9 §7.1',mode:'procedure',text:'WARNING: DO NOT HIT THE PANEL. DAMAGE CAN OCCUR.',must:[['7.1']]}
+      {name:'STE 7.1 warning damage category reviewed',source:'Issue 9 §7.1',mode:'procedure',text:'WARNING: DO NOT HIT THE PANEL. DAMAGE CAN OCCUR.',must:[['7.1']]},
+      {name:'REG fronted-location-imperative',source:'Regression',mode:'procedure',text:'On the operator display, select System Status > Processing Units.',mustNot:[['5.3'],['1.1','Processing'],['1.1','Status']]},
+      {name:'REG UI-path-not-vocabulary',source:'Regression',mode:'procedure',text:'Select Diagnostics > RPU > Built-In Test.',mustNot:[['1.1','Diagnostics'],['1.1','Built'],['1.1','Test']]},
+      {name:'REG technical-compound-service-port',source:'Regression',mode:'procedure',text:'Connect the maintenance laptop to the RPU service port.',mustNot:[['1.1/1.2','port']]},
+      {name:'REG named-technical-nouns-not-hard-vocab',source:'Regression',mode:'procedure',text:'Start the radar maintenance application. Restart the Signal Processing Service.',mustNot:[['1.1/1.2','application'],['1.1/1.2','Service'],['1.1/1.2','Processing']]},
+      {name:'REG radar-context-pos',source:'Regression',mode:'procedure',text:'Connect the maintenance laptop to the RPU service port. Start the radar maintenance application. Restart the Signal Processing Service.',mustNot:[['1.1/1.2','port'],['1.1/1.2','application'],['1.1/1.2','Processing'],['1.1/1.2','Service'],['1.1/1.2','restart']] },
+      {name:'REG conditional-restart-is-TV-review',source:'Regression',mode:'procedure',text:'If the two software versions are the same, restart the Signal Processing Service.',must:[['1.12','restart']],mustNot:[['1.1/1.2','restart']],terms:['restart']},
+      {name:'REG suppress-contained-signal-processing',source:'Regression',mode:'procedure',text:'Record the installed signal-processing software version.',terms:['signal-processing software version'],termsNot:['signal processing']},
+      {name:'REG keep-independent-signal-processing',source:'Regression',mode:'description',text:'Signal processing is necessary. Record the installed signal-processing software version.',terms:['signal processing','signal-processing software version']}
     ],
     runAll(){
       const savedText=$('#sourceText').value, savedMode=mode, savedTerms=projectTerms.map(x=>({...x}));
